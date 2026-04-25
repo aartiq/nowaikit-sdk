@@ -1,0 +1,74 @@
+{
+  "name": "nowaikit-sdk",
+  "version": "2.0.0",
+  "description": "Lightweight ServiceNow REST API client — zero dependencies, TypeScript-first",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./a2a": {
+      "import": "./dist/a2a.js",
+      "types": "./dist/a2a.d.ts"
+    },
+    "./streaming": {
+      "import": "./dist/streaming.js",
+      "types": "./dist/streaming.d.ts"
+    },
+    "./oauth-pkce": {
+      "import": "./dist/oauth-pkce.js",
+      "types": "./dist/oauth-pkce.d.ts"
+    },
+    "./cache": {
+      "import": "./dist/cache.js",
+      "types": "./dist/cache.d.ts"
+    },
+    "./now-assist": {
+      "import": "./dist/now-assist.js",
+      "types": "./dist/now-assist.d.ts"
+    },
+    "./fluent-types": {
+      "import": "./dist/fluent-types.js",
+      "types": "./dist/fluent-types.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.19.33",
+    "vitest": "^4.0.18",
+    "@vitest/coverage-v8": "^4.0.18"
+  },
+  "keywords": [
+    "servicenow",
+    "rest-api",
+    "sdk",
+    "typescript",
+    "nowaikit"
+  ],
+  "author": "NowAIKit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aartiq/nowaikit-sdk"
+  },
+  "homepage": "https://nowaikit.com"
+}
