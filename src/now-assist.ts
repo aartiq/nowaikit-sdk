@@ -15,7 +15,7 @@ export class NowAssistClient {
    */
   async executeSkill(skillSysId: string, input: Record<string, any>): Promise<any> {
     const baseUrl = this.client.getBaseUrl();
-    const response = await (this.client as any).request(
+    const response = await this.client.apiRequest(
       `${baseUrl}/api/now/now_assist/skills/${encodeURIComponent(skillSysId)}/execute`,
       {
         method: 'POST',
@@ -34,7 +34,7 @@ export class NowAssistClient {
       query = `?sysparm_query=active=${active}`;
     }
     const baseUrl = this.client.getBaseUrl();
-    const response = await (this.client as any).request(
+    const response = await this.client.apiRequest(
       `${baseUrl}/api/now/now_assist/skills${query}`,
       { method: 'GET' }
     );
@@ -50,7 +50,7 @@ export class NowAssistClient {
     if (topic) {
       body.topic = topic;
     }
-    const response = await (this.client as any).request(
+    const response = await this.client.apiRequest(
       `${baseUrl}/api/now/now_assist/conversations`,
       {
         method: 'POST',
@@ -65,7 +65,7 @@ export class NowAssistClient {
    */
   async sendMessage(conversationId: string, message: string): Promise<any> {
     const baseUrl = this.client.getBaseUrl();
-    const response = await (this.client as any).request(
+    const response = await this.client.apiRequest(
       `${baseUrl}/api/now/now_assist/conversations/${encodeURIComponent(conversationId)}/messages`,
       {
         method: 'POST',

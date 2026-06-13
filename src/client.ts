@@ -58,6 +58,16 @@ export class ServiceNowClient {
     return this.baseUrl;
   }
 
+  /**
+   * Low-level authenticated request helper for trusted SDK submodules
+   * (e.g. NowAssistClient). Prefer the typed domain methods where they exist.
+   * @internal
+   */
+  async apiRequest<T = any>(url: string, options: RequestInit = {}): Promise<T> {
+    await this.authenticate();
+    return this.request<T>(url, options);
+  }
+
   /** Return a copy configured for a specific user context. */
   withUser(options: { sysId?: string; bearerToken?: string }): ServiceNowClient {
     const copy = Object.create(Object.getPrototypeOf(this)) as ServiceNowClient;
@@ -534,12 +544,45 @@ export class ServiceNowClient {
     }
   }
 
-  async runAggregateQuery(table: string, groupBy: string, _aggregate: string = 'COUNT', query?: string): Promise<any> {
+  /**
+   * Run an aggregate (stats) query.
+   * @param aggregate One of `COUNT`, or `AVG:field` / `SUM:field` / `MIN:field` / `MAX:field`.
+   *                  COUNT and a metric can be combined by passing e.g. `COUNT,AVG:duration`.
+   * @param groupBy   Field(s) to group by — comma-separated for multiple groupings. Pass '' for no grouping.
+   * @param opts      Optional `having` clause (e.g. `COUNT>5`).
+   */
+  async runAggregateQuery(
+    table: string,
+    groupBy: string,
+    aggregate: string = 'COUNT',
+    query?: string,
+    opts?: { having?: string }
+  ): Promise<any> {
     await this.authenticate();
     const params = new URLSearchParams();
-    params.set('sysparm_group_by', groupBy);
+    if (groupBy) params.set('sysparm_group_by', groupBy);
     if (query) params.set('sysparm_query', query);
-    params.set('sysparm_count', 'true');
+    if (opts?.having) params.set('sysparm_having', opts.having);
+
+    // Parse the requested aggregate(s) into the matching stats params.
+    const fieldBuckets: Record<string, string[]> = { avg: [], sum: [], min: [], max: [] };
+    let wantCount = false;
+    for (const part of aggregate.split(',').map((p) => p.trim()).filter(Boolean)) {
+      const [fnRaw, field] = part.split(':').map((s) => s.trim());
+      const fn = fnRaw.toLowerCase();
+      if (fn === 'count') { wantCount = true; continue; }
+      if (field && fn in fieldBuckets) { fieldBuckets[fn].push(field); continue; }
+      // Unknown spec — default to count so the call still returns something useful.
+      wantCount = true;
+    }
+    if (wantCount || (!fieldBuckets.avg.length && !fieldBuckets.sum.length && !fieldBuckets.min.length && !fieldBuckets.max.length)) {
+      params.set('sysparm_count', 'true');
+    }
+    if (fieldBuckets.avg.length) params.set('sysparm_avg_fields', fieldBuckets.avg.join(','));
+    if (fieldBuckets.sum.length) params.set('sysparm_sum_fields', fieldBuckets.sum.join(','));
+    if (fieldBuckets.min.length) params.set('sysparm_min_fields', fieldBuckets.min.join(','));
+    if (fieldBuckets.max.length) params.set('sysparm_max_fields', fieldBuckets.max.join(','));
+
     const url = `${this.baseUrl}/api/now/stats/${table}?${params.toString()}`;
     try {
       const response = await this.request<any>(url);
@@ -547,6 +590,24 @@ export class ServiceNowClient {
     } catch (error) {
       if (error instanceof ServiceNowError) throw error;
       throw new ServiceNowError(`Aggregate query failed: ${error instanceof Error ? error.message : 'Unknown error'}`, 'QUERY_FAILED');
+    }
+  }
+
+  /** Return the number of records matching an (optional) encoded query — a single lightweight stats call. */
+  async getRecordCount(table: string, query?: string): Promise<number> {
+    await this.authenticate();
+    const params = new URLSearchParams();
+    params.set('sysparm_count', 'true');
+    if (query) params.set('sysparm_query', query);
+    const url = `${this.baseUrl}/api/now/stats/${table}?${params.toString()}`;
+    try {
+      const response = await this.request<any>(url);
+      const stats = response.result?.stats ?? response.result;
+      const count = Number(stats?.count ?? 0);
+      return Number.isFinite(count) ? count : 0;
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Count query failed: ${error instanceof Error ? error.message : 'Unknown error'}`, 'QUERY_FAILED');
     }
   }
 
