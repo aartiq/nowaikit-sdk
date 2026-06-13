@@ -8,10 +8,44 @@ import type {
   ServiceNowRecord,
   BatchRequestItem,
   BatchResponseItem,
+  RequestHooks,
+  OAuthGrantType,
+  DictionaryColumn,
+  TableDictionary,
+  AttachmentMeta,
+  ImportSetResult,
+  InstanceStats,
 } from './types.js';
 import { ServiceNowError } from './errors.js';
 import { validateTableName, validateSysId, validateQuery } from './helpers.js';
 import { buildBatchPayload, parseBatchResponse } from './batch.js';
+
+/** Browser- and Node-safe base64 encode of a UTF-8 string. */
+function base64Encode(input: string): string {
+  if (typeof Buffer !== 'undefined') return Buffer.from(input, 'utf8').toString('base64');
+  // Browser fallback
+  // eslint-disable-next-line no-undef
+  return btoa(unescape(encodeURIComponent(input)));
+}
+
+/** Browser- and Node-safe base64 encode of binary bytes. */
+function base64FromBytes(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  // eslint-disable-next-line no-undef
+  return btoa(binary);
+}
+
+/** Browser- and Node-safe base64 decode to bytes. */
+function bytesFromBase64(b64: string): Uint8Array {
+  if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(b64, 'base64'));
+  // eslint-disable-next-line no-undef
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
 
 /** Simple logger that writes to stderr (non-intrusive for MCP/CLI). */
 const logger = {
@@ -39,6 +73,9 @@ export class ServiceNowClient {
   private perUserBearerToken?: string;
   private accessToken?: string;
   private tokenExpiry?: number;
+  private refreshToken?: string;
+  private hooks?: RequestHooks;
+  private onTokenRefresh?: ServiceNowConfig['onTokenRefresh'];
 
   constructor(config: ServiceNowConfig) {
     this.baseUrl = config.instanceUrl.replace(/\/$/, '');
@@ -51,6 +88,9 @@ export class ServiceNowClient {
     this.requestTimeoutMs = config.requestTimeoutMs || 30000;
     this.impersonateUserSysId = config.impersonateUserSysId;
     this.perUserBearerToken = config.perUserBearerToken;
+    this.refreshToken = config.oauth?.refreshToken;
+    this.hooks = config.hooks;
+    this.onTokenRefresh = config.onTokenRefresh;
   }
 
   /** Return the base instance URL. */
@@ -87,25 +127,51 @@ export class ServiceNowClient {
 
   private async authenticate(): Promise<void> {
     if (this.authMethod === 'basic') return;
+    if (this.authMode === 'per-user' && this.perUserBearerToken) return;
 
     if (this.accessToken && this.tokenExpiry && Date.now() < this.tokenExpiry) return;
 
     if (!this.oauthConfig?.clientId || !this.oauthConfig?.clientSecret) {
       throw new ServiceNowError('OAuth client ID and secret are required', 'AUTHENTICATION_FAILED');
     }
-    if (!this.oauthConfig?.username || !this.oauthConfig?.password) {
-      throw new ServiceNowError('Username and password are required for OAuth password grant', 'AUTHENTICATION_FAILED');
+
+    // If a token has expired but we hold a refresh token, prefer refreshing.
+    const grant: OAuthGrantType =
+      this.refreshToken && this.oauthConfig.grantType !== 'client_credentials'
+        ? 'refresh_token'
+        : (this.oauthConfig.grantType || 'password');
+
+    const body = new URLSearchParams({
+      client_id: this.oauthConfig.clientId,
+      client_secret: this.oauthConfig.clientSecret,
+    });
+
+    switch (grant) {
+      case 'refresh_token':
+        if (!this.refreshToken) throw new ServiceNowError('No refresh token available', 'AUTHENTICATION_FAILED');
+        body.set('grant_type', 'refresh_token');
+        body.set('refresh_token', this.refreshToken);
+        break;
+      case 'client_credentials':
+        body.set('grant_type', 'client_credentials');
+        break;
+      case 'jwt':
+        if (!this.oauthConfig.jwtAssertion) throw new ServiceNowError('JWT assertion required for jwt grant', 'AUTHENTICATION_FAILED');
+        body.set('grant_type', 'urn:ietf:params:oauth:grant-type:jwt-bearer');
+        body.set('assertion', this.oauthConfig.jwtAssertion);
+        break;
+      case 'password':
+      default:
+        if (!this.oauthConfig.username || !this.oauthConfig.password) {
+          throw new ServiceNowError('Username and password are required for OAuth password grant', 'AUTHENTICATION_FAILED');
+        }
+        body.set('grant_type', 'password');
+        body.set('username', this.oauthConfig.username);
+        body.set('password', this.oauthConfig.password);
+        break;
     }
 
     const tokenUrl = `${this.baseUrl}/oauth_token.do`;
-    const body = new URLSearchParams({
-      grant_type: 'password',
-      client_id: this.oauthConfig.clientId,
-      client_secret: this.oauthConfig.clientSecret,
-      username: this.oauthConfig.username,
-      password: this.oauthConfig.password,
-    });
-
     try {
       const response = await fetch(tokenUrl, {
         method: 'POST',
@@ -114,6 +180,11 @@ export class ServiceNowClient {
       });
 
       if (!response.ok) {
+        // A failed refresh falls back to the configured primary grant once.
+        if (grant === 'refresh_token') {
+          this.refreshToken = undefined;
+          return this.authenticate();
+        }
         throw new ServiceNowError(
           `OAuth authentication failed: ${response.status} ${response.statusText}`,
           'AUTHENTICATION_FAILED'
@@ -123,7 +194,9 @@ export class ServiceNowClient {
       const tokenData = await response.json() as OAuthTokenResponse;
       this.accessToken = tokenData.access_token;
       this.tokenExpiry = Date.now() + (tokenData.expires_in * 1000 * 0.9);
-      logger.debug('OAuth token acquired successfully');
+      if (tokenData.refresh_token) this.refreshToken = tokenData.refresh_token;
+      this.onTokenRefresh?.({ accessToken: this.accessToken, refreshToken: this.refreshToken, expiresAt: this.tokenExpiry });
+      logger.debug(`OAuth token acquired (${grant})`);
     } catch (error) {
       if (error instanceof ServiceNowError) throw error;
       throw new ServiceNowError(
@@ -141,7 +214,7 @@ export class ServiceNowClient {
       if (!this.basicConfig?.username || !this.basicConfig?.password) {
         throw new ServiceNowError('Username and password are required for Basic auth', 'AUTHENTICATION_FAILED');
       }
-      return `Basic ${Buffer.from(`${this.basicConfig.username}:${this.basicConfig.password}`).toString('base64')}`;
+      return `Basic ${base64Encode(`${this.basicConfig.username}:${this.basicConfig.password}`)}`;
     }
     if (!this.accessToken) {
       throw new ServiceNowError('OAuth token not available. Call authenticate() first.', 'AUTHENTICATION_FAILED');
@@ -170,7 +243,7 @@ export class ServiceNowClient {
         const impersonateHeader = this.getImpersonateHeader();
         if (impersonateHeader) extraHeaders['X-Sn-Impersonate'] = impersonateHeader;
 
-        const response = await fetch(url, {
+        let fetchOptions: RequestInit = {
           ...options,
           signal: controller.signal,
           headers: {
@@ -180,11 +253,30 @@ export class ServiceNowClient {
             ...extraHeaders,
             ...options.headers,
           },
-        });
+        };
 
+        // onRequest hook may override the request init.
+        if (this.hooks?.onRequest) {
+          const override = await this.hooks.onRequest({ url, options: fetchOptions });
+          if (override) fetchOptions = { ...fetchOptions, ...override };
+        }
+
+        const startedAt = Date.now();
+        const response = await fetch(url, fetchOptions);
         clearTimeout(timeout);
 
         if (!response.ok) {
+          // Respect rate limiting before treating as a hard error.
+          if (response.status === 429 && attempt < this.maxRetries) {
+            const retryAfter = Number(response.headers.get('retry-after'));
+            const delay = Number.isFinite(retryAfter) && retryAfter > 0
+              ? retryAfter * 1000
+              : this.retryDelayMs * Math.pow(2, attempt);
+            this.hooks?.onRetry?.({ url, attempt: attempt + 1, delayMs: delay, error: 'HTTP 429' });
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+
           const errorText = await response.text();
           let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
           try {
@@ -197,10 +289,12 @@ export class ServiceNowClient {
           else if (response.status === 403) errorCode = 'INSUFFICIENT_PRIVILEGES';
           else if (response.status === 404) errorCode = 'NOT_FOUND';
           else if (response.status === 400) errorCode = 'INVALID_REQUEST';
+          else if (response.status === 429) errorCode = 'RATE_LIMITED';
 
           throw new ServiceNowError(errorMessage, errorCode);
         }
 
+        this.hooks?.onResponse?.({ url, status: response.status, durationMs: Date.now() - startedAt });
         const data = await response.json();
         return data as T;
       } catch (error) {
@@ -212,6 +306,7 @@ export class ServiceNowClient {
 
         if (attempt < this.maxRetries) {
           const delay = this.retryDelayMs * Math.pow(2, attempt);
+          this.hooks?.onRetry?.({ url, attempt: attempt + 1, delayMs: delay, error: lastError.message });
           logger.warn(`Request failed, retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
@@ -292,11 +387,112 @@ export class ServiceNowClient {
         const sample = response.result[0];
         return { table: tableName, columns: Object.keys(sample).map(key => ({ element: key, value_sample: sample[key] })) };
       }
-      return { table: tableName, columns: [] };
+      // Empty table — fall back to the real dictionary so callers still get columns.
+      try {
+        const dict = await this.getDictionary(tableName);
+        return { table: tableName, columns: dict.columns.map((c) => ({ element: c.element, value_sample: null })) };
+      } catch {
+        return { table: tableName, columns: [] };
+      }
     } catch (error) {
       if (error instanceof ServiceNowError) throw error;
       throw new ServiceNowError(`Failed to get table schema: ${error instanceof Error ? error.message : 'Unknown error'}`, 'QUERY_FAILED');
     }
+  }
+
+  /** Resolve the table inheritance chain (leaf first, then parents) via sys_db_object.super_class. */
+  private async getTableHierarchy(tableName: string): Promise<string[]> {
+    const chain: string[] = [tableName];
+    let current = tableName;
+    // Bounded walk to avoid pathological loops.
+    for (let i = 0; i < 12; i++) {
+      const url = `${this.baseUrl}/api/now/table/sys_db_object?sysparm_query=${encodeURIComponent(`name=${current}`)}&sysparm_fields=super_class.name&sysparm_exclude_reference_link=true&sysparm_limit=1&sysparm_display_value=all`;
+      const resp = await this.request<ServiceNowApiResponse<any[]>>(url);
+      const row = resp.result?.[0];
+      const parent = row ? ((row['super_class.name'] && typeof row['super_class.name'] === 'object') ? row['super_class.name'].value : row['super_class.name']) : '';
+      if (!parent || chain.includes(parent)) break;
+      chain.push(parent);
+      current = parent;
+    }
+    return chain;
+  }
+
+  /**
+   * Return the real column dictionary for a table from `sys_dictionary` —
+   * type, label, mandatory, read-only, reference target, max length, default.
+   * Includes inherited columns from parent tables (resolved via the table hierarchy).
+   */
+  async getDictionary(tableName: string): Promise<TableDictionary> {
+    validateTableName(tableName);
+    await this.authenticate();
+    const fields = 'element,column_label,internal_type,max_length,mandatory,read_only,reference,default_value';
+    let hierarchy: string[] = [tableName];
+    try {
+      hierarchy = await this.getTableHierarchy(tableName);
+    } catch { /* fall back to leaf-only */ }
+    const query = `${hierarchy.map((t) => `name=${t}`).join('^OR')}^elementISNOTEMPTY`;
+    const url = `${this.baseUrl}/api/now/table/sys_dictionary?sysparm_query=${encodeURIComponent(query)}&sysparm_fields=${encodeURIComponent(fields + ',internal_type.name,reference.name')}&sysparm_exclude_reference_link=true&sysparm_limit=2000&sysparm_display_value=all`;
+    logger.info(`Getting dictionary for table: ${tableName} (hierarchy: ${hierarchy.join(' < ')})`);
+    try {
+      const response = await this.request<ServiceNowApiResponse<any[]>>(url);
+      const rows = response.result || [];
+      const columns: DictionaryColumn[] = rows.map((r) => {
+        const val = (f: string) => (r[f] && typeof r[f] === 'object' ? r[f].value : r[f]) ?? '';
+        const disp = (f: string) => (r[f] && typeof r[f] === 'object' ? r[f].display_value : r[f]) ?? '';
+        const maxLen = Number(val('max_length'));
+        return {
+          element: String(val('element')),
+          column_label: String(disp('column_label') || val('column_label')),
+          internal_type: String(disp('internal_type') || val('internal_type')),
+          max_length: Number.isFinite(maxLen) && maxLen > 0 ? maxLen : null,
+          mandatory: String(val('mandatory')) === 'true',
+          read_only: String(val('read_only')) === 'true',
+          reference: val('reference') ? String(disp('reference') || val('reference')) : null,
+          default_value: val('default_value') ? String(val('default_value')) : null,
+        };
+      }).filter((c) => c.element);
+      // Dedupe by element — a child table's override wins over the inherited parent row.
+      const byElement = new Map<string, DictionaryColumn>();
+      for (const col of columns) {
+        if (!byElement.has(col.element)) byElement.set(col.element, col);
+      }
+      return { table: tableName, columns: Array.from(byElement.values()) };
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to get dictionary: ${error instanceof Error ? error.message : 'Unknown error'}`, 'QUERY_FAILED');
+    }
+  }
+
+  /**
+   * Async iterator that yields every record matching the query, transparently
+   * following pagination via sysparm_offset. Avoids the silent 1000-row cap of
+   * a single queryRecords() call.
+   */
+  async *iterateRecords(params: QueryRecordsParams, pageSize = 1000): AsyncGenerator<ServiceNowRecord, void, unknown> {
+    let offset = params.offset ?? 0;
+    const hardLimit = params.limit;
+    let yielded = 0;
+    for (;;) {
+      const remaining = hardLimit !== undefined ? hardLimit - yielded : pageSize;
+      if (remaining <= 0) return;
+      const batchSize = Math.min(pageSize, remaining);
+      const { records } = await this.queryRecords({ ...params, limit: batchSize, offset });
+      if (records.length === 0) return;
+      for (const rec of records) {
+        yield rec;
+        yielded++;
+        if (hardLimit !== undefined && yielded >= hardLimit) return;
+      }
+      if (records.length < batchSize) return; // last page
+      offset += records.length;
+    }
+  }
+
+  /** Collect every matching record into an array (uses iterateRecords under the hood). */
+  async getAllRecords(params: QueryRecordsParams, pageSize = 1000): Promise<ServiceNowRecord[]> {
+    const all: ServiceNowRecord[] = [];
+    for await (const rec of this.iterateRecords(params, pageSize)) all.push(rec);
+    return all;
   }
 
   async getRecord(table: string, sysId: string, fields?: string): Promise<ServiceNowRecord> {
@@ -622,11 +818,11 @@ export class ServiceNowClient {
     await this.authenticate();
     const url = `${this.baseUrl}/api/now/attachment/file?table_name=${encodeURIComponent(table)}&table_sys_id=${encodeURIComponent(recordSysId)}&file_name=${encodeURIComponent(fileName)}`;
     try {
-      const binary = Buffer.from(contentBase64, 'base64');
+      const binary = bytesFromBase64(contentBase64);
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': contentType, 'Authorization': this.getAuthHeader(), 'Accept': 'application/json' },
-        body: binary,
+        body: binary as unknown as BodyInit,
       });
       if (!response.ok) {
         const errorText = await response.text();
@@ -639,6 +835,114 @@ export class ServiceNowClient {
     } catch (error) {
       if (error instanceof ServiceNowError) throw error;
       throw new ServiceNowError(`Failed to upload attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, 'ATTACHMENT_UPLOAD_FAILED');
+    }
+  }
+
+  /** List attachment metadata for a record. */
+  async listAttachments(table: string, recordSysId: string): Promise<AttachmentMeta[]> {
+    validateTableName(table);
+    validateSysId(recordSysId);
+    await this.authenticate();
+    const query = `table_name=${table}^table_sys_id=${recordSysId}`;
+    const url = `${this.baseUrl}/api/now/attachment?sysparm_query=${encodeURIComponent(query)}&sysparm_limit=1000`;
+    try {
+      const response = await this.request<ServiceNowApiResponse<AttachmentMeta[]>>(url);
+      return response.result || [];
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to list attachments: ${error instanceof Error ? error.message : 'Unknown error'}`, 'ATTACHMENT_LIST_FAILED');
+    }
+  }
+
+  /** Download an attachment's bytes as base64 (with its metadata). */
+  async getAttachment(attachmentSysId: string): Promise<{ meta: AttachmentMeta; contentBase64: string }> {
+    validateSysId(attachmentSysId);
+    await this.authenticate();
+    const metaUrl = `${this.baseUrl}/api/now/attachment/${attachmentSysId}`;
+    const fileUrl = `${this.baseUrl}/api/now/attachment/${attachmentSysId}/file`;
+    try {
+      const metaResp = await this.request<ServiceNowApiResponse<AttachmentMeta>>(metaUrl);
+      const fileResp = await fetch(fileUrl, {
+        headers: { 'Authorization': this.getAuthHeader(), 'Accept': '*/*' },
+      });
+      if (!fileResp.ok) throw new ServiceNowError(`HTTP ${fileResp.status}: ${fileResp.statusText}`, 'ATTACHMENT_DOWNLOAD_FAILED');
+      const bytes = new Uint8Array(await fileResp.arrayBuffer());
+      return { meta: metaResp.result, contentBase64: base64FromBytes(bytes) };
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to download attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, 'ATTACHMENT_DOWNLOAD_FAILED');
+    }
+  }
+
+  /** Delete an attachment by sys_id. */
+  async deleteAttachment(attachmentSysId: string): Promise<void> {
+    validateSysId(attachmentSysId);
+    await this.authenticate();
+    const url = `${this.baseUrl}/api/now/attachment/${attachmentSysId}`;
+    try {
+      await this.request<void>(url, { method: 'DELETE' });
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to delete attachment: ${error instanceof Error ? error.message : 'Unknown error'}`, 'ATTACHMENT_DELETE_FAILED');
+    }
+  }
+
+  // ─── Import Sets ───────────────────────────────────────────────────────────
+
+  /**
+   * Insert a row into an import set staging table, running the configured
+   * transform map synchronously and returning the transform result.
+   */
+  async insertImportSetRow(stagingTable: string, data: Record<string, unknown>): Promise<ImportSetResult> {
+    validateTableName(stagingTable);
+    await this.authenticate();
+    const url = `${this.baseUrl}/api/now/import/${stagingTable}`;
+    try {
+      const response = await this.request<ImportSetResult>(url, { method: 'POST', body: JSON.stringify(data) });
+      return response;
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to insert import set row: ${error instanceof Error ? error.message : 'Unknown error'}`, 'IMPORT_FAILED');
+    }
+  }
+
+  /** Get the status/details of an import set by number or sys_id. */
+  async getImportSetStatus(stagingTable: string, importSetSysId: string): Promise<ImportSetResult> {
+    validateTableName(stagingTable);
+    validateSysId(importSetSysId);
+    await this.authenticate();
+    const url = `${this.baseUrl}/api/now/import/${stagingTable}/${importSetSysId}`;
+    try {
+      return await this.request<ImportSetResult>(url);
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to get import set status: ${error instanceof Error ? error.message : 'Unknown error'}`, 'IMPORT_FAILED');
+    }
+  }
+
+  // ─── Instance Metadata ───────────────────────────────────────────────────────
+
+  /** Return basic instance version/build metadata from sys_properties. */
+  async getInstanceStats(): Promise<InstanceStats> {
+    await this.authenticate();
+    const names = ['glide.war', 'glide.buildname', 'glide.buildtag', 'glide.builddate', 'glide.system.hostname'];
+    const query = names.map((n) => `name=${n}`).join('^OR');
+    const url = `${this.baseUrl}/api/now/table/sys_properties?sysparm_query=${encodeURIComponent(query)}&sysparm_fields=name,value&sysparm_limit=50`;
+    try {
+      const response = await this.request<ServiceNowApiResponse<Array<{ name: string; value: string }>>>(url);
+      const map: Record<string, string> = {};
+      for (const row of response.result || []) map[row.name] = row.value;
+      return {
+        instanceUrl: this.baseUrl,
+        version: map['glide.war'] || null,
+        buildName: map['glide.buildname'] || null,
+        buildTag: map['glide.buildtag'] || null,
+        buildDate: map['glide.builddate'] || null,
+        nodeName: map['glide.system.hostname'] || null,
+      };
+    } catch (error) {
+      if (error instanceof ServiceNowError) throw error;
+      throw new ServiceNowError(`Failed to get instance stats: ${error instanceof Error ? error.message : 'Unknown error'}`, 'QUERY_FAILED');
     }
   }
 
@@ -656,10 +960,24 @@ export class ServiceNowClient {
    */
   async batch(requests: BatchRequestItem[]): Promise<BatchResponseItem[]> {
     await this.authenticate();
-    const payload = buildBatchPayload(requests);
     const url = `${this.baseUrl}/api/now/v1/batch`;
-    logger.info(`Executing batch request with ${requests.length} operations`);
 
+    // ServiceNow caps batches at 50 operations — transparently chunk larger sets.
+    const CHUNK = 50;
+    if (requests.length > CHUNK) {
+      logger.info(`Auto-chunking ${requests.length} operations into batches of ${CHUNK}`);
+      const all: BatchResponseItem[] = [];
+      for (let i = 0; i < requests.length; i += CHUNK) {
+        const chunk = requests.slice(i, i + CHUNK);
+        const payload = buildBatchPayload(chunk);
+        const response = await this.request<any>(url, { method: 'POST', body: JSON.stringify(payload) });
+        all.push(...parseBatchResponse(response));
+      }
+      return all;
+    }
+
+    const payload = buildBatchPayload(requests);
+    logger.info(`Executing batch request with ${requests.length} operations`);
     try {
       const response = await this.request<any>(url, {
         method: 'POST',

@@ -8,6 +8,19 @@
  */
 export type AuthMode = 'service-account' | 'per-user' | 'impersonation';
 
+/** OAuth grant type — defaults to 'password' for backward compatibility. */
+export type OAuthGrantType = 'password' | 'refresh_token' | 'client_credentials' | 'jwt';
+
+/** Lifecycle hooks for instrumentation, caching, and logging. */
+export interface RequestHooks {
+  /** Called before each request. Return a modified RequestInit to override. */
+  onRequest?: (ctx: { url: string; options: RequestInit }) => void | RequestInit | Promise<void | RequestInit>;
+  /** Called after each successful response (status < 400). */
+  onResponse?: (ctx: { url: string; status: number; durationMs: number }) => void;
+  /** Called before each retry. */
+  onRetry?: (ctx: { url: string; attempt: number; delayMs: number; error: string }) => void;
+}
+
 export interface ServiceNowConfig {
   instanceUrl: string;
   authMethod: 'oauth' | 'basic';
@@ -22,6 +35,12 @@ export interface ServiceNowConfig {
     clientSecret?: string;
     username?: string;
     password?: string;
+    /** Grant type — defaults to 'password'. */
+    grantType?: OAuthGrantType;
+    /** For 'refresh_token' grant. */
+    refreshToken?: string;
+    /** For 'jwt' grant (RFC 7523 assertion). */
+    jwtAssertion?: string;
   };
   basic?: {
     username?: string;
@@ -30,6 +49,58 @@ export interface ServiceNowConfig {
   maxRetries?: number;
   retryDelayMs?: number;
   requestTimeoutMs?: number;
+  /** Lifecycle hooks (instrumentation, caching, logging). */
+  hooks?: RequestHooks;
+  /** Invoked whenever new OAuth tokens are obtained, so callers can persist them. */
+  onTokenRefresh?: (tokens: { accessToken: string; refreshToken?: string; expiresAt: number }) => void;
+}
+
+// ─── Schema / Dictionary ───────────────────────────────────────────────────────
+
+export interface DictionaryColumn {
+  element: string;
+  column_label: string;
+  internal_type: string;
+  max_length: number | null;
+  mandatory: boolean;
+  read_only: boolean;
+  reference: string | null;
+  default_value: string | null;
+}
+
+export interface TableDictionary {
+  table: string;
+  columns: DictionaryColumn[];
+}
+
+// ─── Attachments ───────────────────────────────────────────────────────────────
+
+export interface AttachmentMeta {
+  sys_id: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: string;
+  table_name: string;
+  table_sys_id: string;
+  download_link: string;
+  [key: string]: unknown;
+}
+
+// ─── Import Sets ───────────────────────────────────────────────────────────────
+
+export interface ImportSetResult {
+  import_set: string;
+  staging_table: string;
+  result: Array<{ transform_map?: string; table?: string; display_name?: string; display_value?: string; record_link?: string; status?: string; sys_id?: string; error_message?: string }>;
+}
+
+export interface InstanceStats {
+  instanceUrl: string;
+  version: string | null;
+  buildName: string | null;
+  buildTag: string | null;
+  buildDate: string | null;
+  nodeName: string | null;
 }
 
 export interface QueryRecordsParams {

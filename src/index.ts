@@ -23,6 +23,8 @@ export type {
   // Core
   AuthMode,
   ServiceNowConfig,
+  OAuthGrantType,
+  RequestHooks,
   QueryRecordsParams,
   QueryRecordsResponse,
   ServiceNowRecord,
@@ -30,6 +32,12 @@ export type {
   OAuthTokenResponse,
   ServiceNowApiResponse,
   ServiceNowApiError,
+  // Schema / attachments / import sets / instance
+  DictionaryColumn,
+  TableDictionary,
+  AttachmentMeta,
+  ImportSetResult,
+  InstanceStats,
   // Batch
   BatchRequestItem,
   BatchResponseItem,

@@ -1,6 +1,6 @@
 {
   "name": "nowaikit-sdk",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Lightweight ServiceNow REST API client — zero dependencies, TypeScript-first",
   "type": "module",
   "main": "dist/index.js",
@@ -33,6 +33,10 @@
     "./fluent-types": {
       "import": "./dist/fluent-types.js",
       "types": "./dist/fluent-types.d.ts"
+    },
+    "./mcp": {
+      "import": "./dist/mcp.js",
+      "types": "./dist/mcp.d.ts"
     }
   },
   "files": [
