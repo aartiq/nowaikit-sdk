@@ -352,7 +352,7 @@ export class ServiceNowClient {
       if (params.orderBy.startsWith('-')) {
         const field = params.orderBy.substring(1);
         queryParams.set('sysparm_query',
-          params.query ? `${params.query}^ORDERBY${field}^ORDERBYDESC` : `ORDERBY${field}^ORDERBYDESC`
+          params.query ? `${params.query}^ORDERBYDESC${field}` : `ORDERBYDESC${field}`
         );
       } else {
         queryParams.set('sysparm_query',
