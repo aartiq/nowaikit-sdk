@@ -1,7 +1,7 @@
 {
   "name": "nowaikit-sdk",
-  "version": "2.1.0",
-  "description": "Lightweight ServiceNow REST API client — zero dependencies, TypeScript-first",
+  "version": "2.2.0",
+  "description": "Lightweight ServiceNow REST API client \u2014 zero dependencies, TypeScript-first",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -37,6 +37,18 @@
     "./mcp": {
       "import": "./dist/mcp.js",
       "types": "./dist/mcp.d.ts"
+    },
+    "./action-fabric": {
+      "import": "./dist/action-fabric.js",
+      "types": "./dist/action-fabric.d.ts"
+    },
+    "./catalog-form": {
+      "import": "./dist/catalog-form.js",
+      "types": "./dist/catalog-form.d.ts"
+    },
+    "./jobs": {
+      "import": "./dist/jobs.js",
+      "types": "./dist/jobs.d.ts"
     }
   },
   "files": [

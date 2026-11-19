@@ -18,6 +18,27 @@ export { SchemaCache } from './cache.js';
 export { NowAssistClient } from './now-assist.js';
 export type { NowConfig, FluentComponent, UxAppRoute, FluentDataBroker } from './fluent-types.js';
 
+// v2.2.0 modules (NowAIKit 5.0 surfaces)
+export {
+  listMcpServers, mcpEndpointName, mcpServerUrl, isJwt, ServiceNowMcpClient, listServiceNowMcpTools,
+  callServiceNowMcpTool, listAiAgents, getAgentCard, sendAgentMessage, getAgentTask, a2aReplyText,
+  SN_MCP_PROTOCOL_VERSION,
+} from './action-fabric.js';
+export type {
+  SnMcpServer, SnMcpServerTool, ListMcpServersOptions, McpToolInfo, McpCallToolResult, ServiceNowMcpClientConfig,
+  SnAgentSummary, SnAgentCard, A2AV3Part, A2AV3Message, A2AV3Task, SendAgentMessageOptions, SendAgentMessageResult,
+} from './action-fabric.js';
+export {
+  getCatalogForm, submitCatalogForm, missingMandatoryFields, normalizeCatalogVariable, normalizeCatalogVariables,
+  normalizeCatalogPolicies, catalogVariableIdMap, flattenFields,
+} from './catalog-form.js';
+export type {
+  CatalogForm, SubmitCatalogFormResult, FormField, FormChoice, FieldKind, FormPolicy, PolicyCondition, PolicyAction,
+  CatalogFormContext,
+} from './catalog-form.js';
+export { waitForJob, callToolAndWait, isJobHandle, isTerminalJobStatus, parseToolOutput } from './jobs.js';
+export type { JobView, JobStatus, ToolCaller, WaitForJobOptions } from './jobs.js';
+
 // Re-export all types
 export type {
   // Core
